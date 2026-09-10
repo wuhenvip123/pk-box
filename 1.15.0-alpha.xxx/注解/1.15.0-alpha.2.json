@@ -881,3 +881,175 @@
     }
   }
 }
+
+
+
+// =====================================================================
+// sing-box 1.15.0-alpha.2 Android 配置总结（纯注释版）
+// =====================================================================
+
+// 【一、整体定位】
+// 这是一份面向 Android SFA 的 sing-box 配置。
+// 核心目标是：国内流量直连、国外流量代理、DNS 防污染、广告拦截、服务分组、自动测速。
+// 整体数据流是：TUN 入站捕获流量 -> DNS 劫持与分流 -> 路由规则匹配 -> 出站选择器 -> 代理/直连/拒绝。
+// 配置结构完整，包含 log、dns、http_clients、inbounds、outbounds、route、experimental。
+// 它适合进阶用户，但依赖节点、规则集、DNS 环境，调试成本较高。
+
+// 【二、日志模块总结】
+// log.level 使用 trace，输出最详细日志，适合排查问题。
+// log.timestamp 开启时间戳，方便定位问题发生时间。
+// trace 级别会大量消耗 CPU、内存和存储，长期使用建议改为 info 或 warn。
+// 如果只是日常使用，trace 会导致发热、耗电、日志文件膨胀。
+
+// 【三、DNS 模块总结】
+// hosts_fix 使用静态 hosts 固定 cloudflare-dns.com、dns.google、raw.githubusercontent.com 的 IP。
+// 固定这些 IP 是为了避免 DoH 域名被污染，也避免规则集下载失败。
+// pkpk-dns 是本地系统 DNS，作为 default_domain_resolver。
+// pk-dns 是 UDP DNS，指向 192.168.3.1，通常是局域网网关或路由器。
+// fakeip 使用 198.18.0.0/15，返回虚拟 IP，再通过路由规则映射回域名。
+// cf-dns 是 Cloudflare DoH，通过 📦 sing-box 代理出去查询。
+// google-dns 是 Google DoH，同样通过代理出去查询。
+// cf-dns 和 google-dns 的 domain_resolver 都指向 hosts_fix，避免循环解析。
+// DNS 规则先对 Google、OpenAI、Anthropic、Claude、ChatGPT 走 cf-dns。
+// 然后拒绝 SVCB、HTTPS、PTR 查询，减少信息泄露和无效查询。
+// 再拒绝 AdGuard、广告、反诈骗、HTTP DNS 等规则集。
+// 国内小米、B站、DeepSeek 等域名走 pk-dns，获取国内最优 CDN。
+// 微软中国、苹果中国、国内游戏规则集也走 pk-dns。
+// cf-dns 和 google-dns 使用 evaluate + match_response + race 实现并行竞速。
+// race 为 true 时，谁先返回就用谁，提高 DNS 解析速度。
+// speculative 让 Google DNS 尽早发出查询，但优先使用竞态结果。
+// clash_mode 为 global 时，DNS 走 fakeip。
+// dns.final 是 cf-dns，未匹配的 DNS 默认走 Cloudflare DoH。
+// strategy 是 ipv4_only，只解析 IPv4，减少 IPv6 兼容问题。
+// timeout 是 10s，单次 DNS 查询超时时间。
+// cache_capacity 是 16384，DNS 缓存最多 16384 条。
+// optimistic 启用，timeout 为 5 分钟，允许过期缓存被临时返回。
+
+// 【四、HTTP 客户端总结】
+// http_clients 定义了一个 default 客户端。
+// version 为 2，使用 HTTP/2。
+// stream_receive_window 和 connection_receive_window 为 0，表示自动选择。
+// 它用于规则集下载、DoH 连接等内部 HTTP 请求。
+
+// 【五、入站模块总结】
+// inbounds 只有一个 TUN 入站，tag 是 tun-in。
+// MTU 为 1500，标准以太网 MTU。
+// address 是 30.0.0.1/24，TUN 虚拟网卡地址。
+// dns_mode 是 hijack，直接劫持 DNS 请求。
+// auto_route 为 true，自动配置系统路由，让流量进入 TUN。
+// strict_route 为 true，但 Android SFA 中通常未实现，写了不一定生效。
+// exclude_interface 排除了 wlan1 和 ap0，通常需要 root 权限。
+// exclude_package 排除了支付宝、微信、小米应用商店、淘宝、京东、抖音、B站、小米推送、DeepSeek。
+// 排除这些应用是为了让国内应用直连，提高速度并减少代理流量。
+// 但 exclude_package 可能不完整，某些子进程或 SDK 仍可能走代理。
+// udp_timeout 是 5m0s，UDP 会话空闲 5 分钟后清理。
+// udp_nat_max 是 4096，UDP NAT 最大会话数。
+// stack 是 mixed，自动选择协议栈，兼顾性能和兼容性。
+// endpoint_independent_nat 为 true，旧字段，1.14+ 建议迁移到 udp_mapping。
+
+// 【六、出站模块总结】
+// DIRECT 是直连出站，用于国内流量、局域网、NTP、ICMP 等。
+// 📦 sing-box 是主选择器，包含 🟢 自动-测速、🔵 自动-稳定、pkpk1。
+// 📦 sing-box 默认使用 🟢 自动-测速。
+// 🟢 自动-测速 是 urltest，1 分钟测速一次，容差 100ms。
+// 🔵 自动-稳定 是 urltest，3 分钟测速一次，容差 30ms。
+// 🧭 Google Services 是 Google 服务专用选择器，默认走 📦 sing-box。
+// 📬 Google FCM 是 Google 推送专用选择器，默认走 📦 sing-box。
+// 🍎 Apple 默认 DIRECT，苹果中国服务直连。
+// 📺 StreamingME 是流媒体选择器，默认走 📦 sing-box。
+// 🪟 Microsoft 默认 DIRECT，微软中国服务直连。
+// 📠 Telegram 默认走 📦 sing-box，配合 Telegram IP 段规则。
+// 🇨🇳 国内流量默认 DIRECT，可手动切到 📦 sing-box。
+// GLOBAL 是全局代理选择器，默认走 📦 sing-box。
+// 🚦 FINAL 是最终兜底选择器，默认走 📦 sing-box，备选 DIRECT 和 ❌ REJECT-DROP。
+// ❌ REJECT-DROP 是 block 出站，用于丢弃连接。
+// outbounds 中“//节点配置”处没有实际节点，必须补全 pkpk1 等节点，否则启动会失败。
+// interrupt_exist_connections 全为 true，切换节点时会断开现有连接，下载和视频可能中断。
+
+// 【七、路由模块总结】
+// route.rules 先对非中国域名执行 sniff，提取域名和协议。
+// 然后逻辑或规则劫持 53 端口和 dns 协议，确保 DNS 走 sing-box。
+// OpenAI、Anthropic、Claude、ChatGPT、Google、iturrit 等域名直接走 📦 sing-box。
+// ICMP 直连，保证 ping 正常。
+// 私有 IP、回环、链路本地地址直连。
+// jsdelivr 直连，因为规则集从 jsdelivr 下载。
+// 0.0.0.0/8 被拒绝，避免异常流量。
+// 广告、欺诈、反诈骗规则集在路由层再次拒绝。
+// STUN 和 DTLS 被 drop，防止 P2P 和 VoIP 泄露真实 IP。
+// route-options 设置 UDP 禁用域名反向映射，并启用 UDP connect。
+// 国内应用包名走 🇨🇳 国内流量，包括微信、QQ、淘宝、支付宝、抖音、B站、百度、拼多多、微博、小红书、快手、知乎、腾讯视频、爱奇艺、钉钉、京东、美团、豆瓣、UC、企业微信、网易云音乐、WPS、银联、交行。
+// Telegram 官方 IP 段走 📠 Telegram。
+// Google 规则集走 🧭 Google Services。
+// Google FCM 规则集走 📬 Google FCM。
+// Netflix、Disney、YouTube、Spotify、Prime Video 走 📺 StreamingME。
+// Android、proxy、gfw、ai、games、networktest 走 GLOBAL。
+// cn、cnip、games-cn 走 🇨🇳 国内流量。
+// microsoft-cn 走 🪟 Microsoft。
+// apple-cn 走 🍎 Apple。
+// NTP 直连，避免时间同步异常。
+// clash_mode 为 direct 时全部直连。
+// clash_mode 为 global 时全部走 GLOBAL。
+// 海外应用包名走 📦 sing-box，包括 Twitter、YouTube、Maps、Instagram、Facebook、WhatsApp、Telegram、Discord、Reddit、Spotify、Netflix、Gmail、Google Docs、Photos、Translate、Keep、Snapchat、TikTok、Google Play。
+// 198.18.0.0/15 的 FakeIP 流量走 📦 sing-box。
+// 非中国域名使用 route-options 覆盖目标地址为嗅探域名或原始目标。
+// 非中国流量兜底走 📦 sing-box。
+// route.final 是 🚦 FINAL，所有未匹配流量最终走这里。
+// auto_detect_interface 为 true，自动绑定默认网卡，防止路由环路。
+// default_domain_resolver 是 pkpk-dns，默认用本地 DNS 解析。
+// default_http_client 是 default，内部 HTTP 请求使用该客户端。
+
+// 【八、规则集总结】
+// 规则集大多是远程 .srs 文件，48 小时更新一次。
+// 来源包括 DustinWin、senshinya、MetaCubeX、217heidai、SagerNet、hwsaya。
+// 规则集覆盖 cn、cnip、ads、proxy、ai、games、microsoft-cn、apple-cn、games-cn、networktest、netflix、disney、youtube、spotify、primevideo。
+// 也覆盖 Google、Android、GoogleFCM、BlockHttpDNS、AdGuardSDNSFilter、gfw、geosite_adguard、geosite-category-ads-all、anti_fraud。
+// anti_fraud 是 JSON 格式，不是 .srs，加载效率可能不同。
+// 规则集全部依赖 cdn.jsdelivr.net，如果 jsdelivr 不可达，更新会失败。
+// 规则集更新间隔 48 小时，比较合理，但首次启动需要联网下载。
+
+// 【九、实验性模块总结】
+// experimental.cache_file 启用，缓存文件为 cache.db。
+// store_fakeip 为 true，重启后 FakeIP 映射保持。
+// store_dns 为 true，重启后 DNS 缓存保持。
+// 缓存可以提升启动速度和解析速度。
+// 1.15.0-alpha.1 后缓存写入有缓冲机制，性能更好，但异常退出可能丢少量缓存。
+
+// 【十、发现的主要问题】
+// 1. trace 日志太详细，长期开启会发热、耗电、占空间。
+// 2. strict_route 在 Android SFA 中通常不生效。
+// 3. exclude_interface 需要 root，普通 SFA 可能无效。
+// 4. exclude_package 可能不完整，部分应用子进程仍会走代理。
+// 5. interrupt_exist_connections 全为 true，切换节点会断流。
+// 6. outbounds 缺少实际节点，pkpk1 不存在会导致启动失败。
+// 7. 规则集依赖 jsdelivr，存在下载失败风险。
+// 8. DoH 域名固定到 1.1.1.1 和 8.8.8.8，如果这些 IP 被封锁，DoH 会失败。
+// 9. anti_fraud 是 JSON 规则集，兼容性需要确认。
+// 10. endpoint_independent_nat 已过时，建议迁移到 udp_mapping。
+// 11. 乐观缓存可能返回过期 IP，对 CDN 影响小，对实时服务可能有影响。
+// 12. FakeIP 与部分银行、游戏、直播应用可能不兼容。
+// 13. udp_nat_max 4096 对多任务 P2P 或游戏可能偏小。
+// 14. 1.15.0-alpha.2 是 alpha 版本，稳定性不如正式版。
+
+// 【十一、优化建议】
+// 1. 补全节点配置，确保 pkpk1 存在且可用。
+// 2. 日常使用把 log.level 改为 info 或 warn。
+// 3. 删除或忽略 strict_route、exclude_interface。
+// 4. 按需把 interrupt_exist_connections 改为 false，减少断流。
+// 5. 检查 pk-dns 的 192.168.3.1 是否为实际网关 DNS。
+// 6. 测试 cf-dns 和 google-dns 竞速是否正常。
+// 7. 定期检查规则集 URL 是否可访问。
+// 8. 如果不需要 FakeIP，可以移除 fakeip 相关规则。
+// 9. 使用 Clash API 观察连接、规则命中和节点延迟。
+// 10. 升级 sing-box 前备份配置，并检查字段兼容性。
+// 11. 如果 jsdelivr 不稳定，可以更换规则集 CDN。
+// 12. 如果 DoH 被封锁，可以更换 DoH 域名和固定 IP。
+// 13. 根据设备性能调整 cache_capacity 和 udp_nat_max。
+// 14. 生产环境建议使用 sing-box 稳定版，而不是 alpha 版。
+
+// 【十二、总体评价】
+// 这份配置功能全面，分流细致，DNS 防污染和广告拦截做得比较完整。
+// 国内直连、国外代理、服务分组、自动测速、FakeIP、缓存持久化都有覆盖。
+// 但它对节点、规则集、DNS 环境依赖较高，调试成本也较高。
+// 如果节点缺失、规则集下载失败、DNS 不可用，容易出现启动失败或部分应用断网。
+// 总体评价：结构清晰，适合进阶用户，但需要根据自身网络环境调整后再长期使用。
+// =====================================================================
